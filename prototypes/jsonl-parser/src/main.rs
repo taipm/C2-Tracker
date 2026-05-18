@@ -1,4 +1,5 @@
 mod db;
+mod install;
 mod parser;
 mod server;
 mod types;
@@ -46,6 +47,25 @@ enum Cmd {
     },
     /// In bearer token hiện tại
     Token,
+    /// Cài đặt hooks vào ~/.claude/settings.json
+    InstallHooks {
+        #[arg(long, default_value = "9786")]
+        port: u16,
+        /// Path tới settings.json (override mặc định)
+        #[arg(long)]
+        settings: Option<PathBuf>,
+        /// Force ghi đè entry C2-Tracker cũ nếu có
+        #[arg(long)]
+        force: bool,
+        /// Bắt buộc dùng command shim (curl) thay vì http hook native
+        #[arg(long)]
+        force_command_shim: bool,
+    },
+    /// Gỡ hooks C2-Tracker khỏi ~/.claude/settings.json
+    UninstallHooks {
+        #[arg(long)]
+        settings: Option<PathBuf>,
+    },
 }
 
 fn default_db() -> PathBuf {
@@ -179,6 +199,14 @@ async fn main() -> Result<()> {
                 println!("Run `c2-engine serve` to generate a token.");
             }
             Ok(())
+        }
+
+        Cmd::InstallHooks { port, settings, force, force_command_shim } => {
+            install::install(settings, port, force, force_command_shim)
+        }
+
+        Cmd::UninstallHooks { settings } => {
+            install::uninstall(settings)
         }
     }
 }
