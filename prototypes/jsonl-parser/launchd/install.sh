@@ -4,15 +4,26 @@
 set -euo pipefail
 
 PLIST_NAME="club.microai.c2tracker.engine.plist"
-SRC="$(cd "$(dirname "$0")" && pwd)/$PLIST_NAME"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SRC="$SCRIPT_DIR/$PLIST_NAME"
 DST="$HOME/Library/LaunchAgents/$PLIST_NAME"
-BIN="$(cd "$(dirname "$0")"/.. && pwd)/target/release/c2-engine"
 
-if [[ ! -x "$BIN" ]]; then
-    echo "Binary chưa tồn tại: $BIN"
-    echo "Chạy 'cargo build --release' trong $(dirname "$BIN")/.. trước."
+# Detect binary: ưu tiên cạnh script (release tarball), fallback target/release (dev tree)
+if [[ -x "$SCRIPT_DIR/c2-engine" ]]; then
+    BIN="$SCRIPT_DIR/c2-engine"
+elif [[ -x "$SCRIPT_DIR/../target/release/c2-engine" ]]; then
+    BIN="$(cd "$SCRIPT_DIR/.." && pwd)/target/release/c2-engine"
+else
+    echo "✗ Không tìm thấy c2-engine binary."
+    echo "  Tìm ở: $SCRIPT_DIR/c2-engine"
+    echo "  Hoặc:  $SCRIPT_DIR/../target/release/c2-engine"
+    echo ""
+    echo "Nếu clone từ source: chạy 'cargo build --release' trong $(cd "$SCRIPT_DIR/.." && pwd)"
+    echo "Nếu dùng release tarball: đảm bảo extract đầy đủ."
     exit 1
 fi
+
+echo "→ Binary: $BIN"
 
 # Patch plist với path binary đúng (trường hợp clone repo về vị trí khác)
 mkdir -p "$HOME/Library/LaunchAgents"

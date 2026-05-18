@@ -42,35 +42,87 @@ Claude Code session
 
 ### Yêu cầu
 
-- macOS Apple Silicon (Linux x86_64 chưa được verify đầy đủ).
-- Rust 1.95+ (`rustup toolchain install stable`).
-- Tauri CLI v2: `cargo install tauri-cli --version "^2.0" --locked`.
-- Claude Code đã được cài (CLI `claude --version` ≥ 2.0 khuyến nghị).
+- **macOS Apple Silicon** (Linux x86_64 chưa được verify đầy đủ).
+- **Rust 1.95+**: `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
+- **Tauri CLI v2** (chỉ cần khi muốn dùng UI): `cargo install tauri-cli --version "^2.0" --locked`
+- **Python 3** (chỉ cần để sinh icons placeholder cho UI build).
+- **Claude Code** CLI ≥ 2.0 khuyến nghị (Claude Code < 2.0 vẫn work với fallback command shim).
 
-### Bước
+### Cách A — Dùng release tarball (chỉ engine, không UI)
+
+Nhanh nhất nếu chỉ cần daemon thu thập (chưa cần UI). Phù hợp khi muốn xem qua sqlite CLI hoặc tích hợp downstream.
+
+```bash
+# 1. Tải artifact từ Gitea release
+curl -L -O https://git.microai.club/taipm/C2-Tracker/releases/download/v0.0.1/c2-tracker-v0.0.1-darwin-arm64.tar.gz
+tar xzf c2-tracker-v0.0.1-darwin-arm64.tar.gz
+cd c2-tracker-v0.0.1-darwin-arm64
+
+# 2. Cài LaunchAgent (daemon auto-start)
+chmod +x install.sh c2-engine
+./install.sh
+
+# 3. Cài hooks vào ~/.claude/settings.json
+./c2-engine install-hooks --force-command-shim
+
+# 4. (Tùy chọn) Import session lịch sử có sẵn
+./c2-engine import-all
+```
+
+Kiểm tra: `launchctl list | grep c2tracker` phải thấy `club.microai.c2tracker.engine`.
+
+### Cách B — Build từ source (full bao gồm UI)
+
+Bắt buộc nếu muốn dùng giao diện desktop. ~5-10 phút lần đầu (Rust + Tauri compile).
 
 ```bash
 git clone https://git.microai.club/taipm/C2-Tracker.git
 cd C2-Tracker
 
-# 1. Build engine (release, ~30s)
-cd prototypes/jsonl-parser && cargo build --release && cd ../..
+# 1. Build engine release
+cd prototypes/jsonl-parser
+cargo build --release
+cd ../..
 
-# 2. Cài LaunchAgent (macOS) — daemon auto-start
+# 2. Cài LaunchAgent
 ./prototypes/jsonl-parser/launchd/install.sh
 
-# 3. Cài hooks vào Claude Code settings
+# 3. Cài hooks
 ./prototypes/jsonl-parser/target/release/c2-engine install-hooks --force-command-shim
 
-# 4. Import toàn bộ session lịch sử (tùy chọn)
+# 4. Import session lịch sử (tùy chọn)
 ./prototypes/jsonl-parser/target/release/c2-engine import-all
 
 # 5. Build & chạy UI
 cd app
-python3 gen_icons.py
-cd src-tauri && cargo build --release
-cargo tauri dev    # hoặc cargo tauri build cho production
+python3 gen_icons.py        # sinh 4 PNG icon placeholder
+cargo tauri dev             # mở UI dev mode
+# hoặc: cargo tauri build   # tạo .app bundle (chưa code-signed)
 ```
+
+### Gỡ cài đặt
+
+```bash
+# Stop daemon
+launchctl unload ~/Library/LaunchAgents/club.microai.c2tracker.engine.plist
+rm ~/Library/LaunchAgents/club.microai.c2tracker.engine.plist
+
+# Gỡ hooks khỏi Claude Code settings (restore từ backup tự động)
+./c2-engine uninstall-hooks
+
+# Xoá dữ liệu (tuỳ chọn)
+rm -rf ~/.c2-tracker  # DB, token, log
+```
+
+### Troubleshooting
+
+| Triệu chứng | Nguyên nhân | Cách fix |
+|---|---|---|
+| `launchctl: Path not specified` | `install.sh` chưa patch path | Bản v0.0.1 nâng cấp đã fix, dùng commit mới nhất |
+| Daemon không listen 9786 | Port bị chiếm | `lsof -i :9786` xem process nào, `kill` hoặc đổi port trong plist |
+| UI hiển thị "Chưa có session" | DB rỗng | Chạy `c2-engine import-all` để populate |
+| Hooks không fire | Claude Code chưa reload settings | Restart `claude` session hoặc gửi prompt mới |
+| WebSocket disconnect liên tục | Token mismatch | `cat ~/.c2-tracker/env` so với `~/.c2-tracker/runtime.json` |
 
 ## Sử dụng
 
