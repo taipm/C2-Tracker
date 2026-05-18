@@ -73,3 +73,5 @@ Bản release đầu tiên. MVP Phase 1 hoàn tất (9/10 milestone, M1.10 Expor
 - Phụ thuộc runtime: SQLite (bundled), Rust 1.95+, Tauri 2.x.
 
 [v0.0.1]: https://git.microai.club/taipm/C2-Tracker/releases/tag/v0.0.1
+
+<!-- mirror sync test: Mon May 18 18:30:13 +07 2026 -->
