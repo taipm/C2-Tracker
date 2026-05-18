@@ -74,21 +74,101 @@ async function init() {
   }
 
   attachHandlers();
-  startPolling();
+  startWebSocket();
 }
 
-let pollHandle = null;
 let lastEventMaxId = 0;
+let ws = null;
+let wsReconnectTimer = null;
+let wsBackoffMs = 1000;
 
-function startPolling() {
-  if (pollHandle) return;
-  pollHandle = setInterval(refreshTick, 3000);
+async function startWebSocket() {
+  let runtime;
+  try {
+    runtime = await invoke("get_runtime");
+  } catch (err) {
+    console.warn("get_runtime failed, fallback polling:", err);
+    return startPollingFallback();
+  }
+  if (!runtime || !runtime.port || !runtime.token) {
+    console.warn("runtime.json không có — fallback polling");
+    return startPollingFallback();
+  }
+  const url = `ws://127.0.0.1:${runtime.port}/ws?token=${encodeURIComponent(runtime.token)}`;
+
+  try {
+    ws = new WebSocket(url);
+  } catch (err) {
+    console.warn("WS construct failed:", err);
+    return scheduleReconnect();
+  }
+
+  ws.addEventListener("open", () => {
+    wsBackoffMs = 1000;
+    setHealthDot(true);
+    console.log("[WS] connected");
+  });
+  ws.addEventListener("message", (ev) => handleWsMessage(ev.data));
+  ws.addEventListener("close", () => {
+    setHealthDot(false);
+    console.warn("[WS] closed, reconnecting...");
+    scheduleReconnect();
+  });
+  ws.addEventListener("error", (e) => {
+    console.warn("[WS] error", e);
+    // close handler sẽ trigger reconnect
+  });
 }
 
-async function refreshTick() {
+function scheduleReconnect() {
+  if (wsReconnectTimer) return;
+  const delay = wsBackoffMs;
+  wsReconnectTimer = setTimeout(() => {
+    wsReconnectTimer = null;
+    startWebSocket();
+  }, delay);
+  wsBackoffMs = Math.min(wsBackoffMs * 2, 30000);
+}
+
+function setHealthDot(alive) {
+  const dot = document.querySelector(".rec-dot");
+  if (dot) dot.style.opacity = alive ? "1" : "0.35";
+}
+
+async function handleWsMessage(raw) {
+  let msg;
+  try {
+    msg = JSON.parse(raw);
+  } catch {
+    return;
+  }
+  if (msg.kind === "hello") return;
+
+  if (msg.kind === "session-upsert") {
+    await refreshSessionsAndStats();
+    return;
+  }
+
+  if (msg.kind === "event-batch") {
+    // Chỉ refetch nếu session đang xem
+    if (msg.session_id === state.activeSessionId) {
+      try {
+        const evs = await invoke("get_events", { sessionId: state.activeSessionId });
+        state.events = evs;
+        lastEventMaxId = evs.length ? evs[evs.length - 1].id : 0;
+        renderStream(state.events, document.getElementById("stream"), { autoFollow: state.autoFollow });
+      } catch (e) {
+        console.warn("get_events failed:", e);
+      }
+    }
+    // Vẫn refresh stats + sidebar (last_event_at, token_count tăng)
+    await refreshSessionsAndStats({ skipReorderActive: true });
+  }
+}
+
+async function refreshSessionsAndStats(_opts = {}) {
   try {
     const fresh = await invoke("get_sessions");
-    const prevTopId = state.sessions[0]?.id;
     state.sessions = fresh;
     renderSessionList(state.sessions, document.getElementById("session-list"), {
       activeId: state.activeSessionId,
@@ -101,20 +181,35 @@ async function refreshTick() {
     state.stats = newStats;
     renderQuickStats();
 
+    // Cập nhật session header (token_count, event_count thay đổi)
     if (state.activeSessionId) {
-      const evs = await invoke("get_events", { sessionId: state.activeSessionId });
-      const newMax = evs.length ? evs[evs.length - 1].id : 0;
-      if (newMax !== lastEventMaxId) {
-        state.events = evs;
-        lastEventMaxId = newMax;
-        const session = state.sessions.find((s) => s.id === state.activeSessionId);
-        renderSessionHeader(session, document.getElementById("session-header"));
-        renderStream(state.events, document.getElementById("stream"), { autoFollow: state.autoFollow });
-      }
+      const session = state.sessions.find((s) => s.id === state.activeSessionId);
+      if (session) renderSessionHeader(session, document.getElementById("session-header"));
     }
   } catch (err) {
-    console.warn("Polling tick failed:", err);
+    console.warn("refresh failed:", err);
   }
+}
+
+// Fallback: polling 5s nếu WS không kết nối được
+let pollHandle = null;
+function startPollingFallback() {
+  if (pollHandle) return;
+  console.log("[fallback] polling 5s");
+  pollHandle = setInterval(async () => {
+    await refreshSessionsAndStats();
+    if (state.activeSessionId) {
+      try {
+        const evs = await invoke("get_events", { sessionId: state.activeSessionId });
+        const newMax = evs.length ? evs[evs.length - 1].id : 0;
+        if (newMax !== lastEventMaxId) {
+          state.events = evs;
+          lastEventMaxId = newMax;
+          renderStream(state.events, document.getElementById("stream"), { autoFollow: state.autoFollow });
+        }
+      } catch {}
+    }
+  }, 5000);
 }
 
 function renderRecordingIndicator() {

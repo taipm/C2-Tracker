@@ -7,18 +7,20 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use tokio::{sync::mpsc, time::sleep};
+use tokio::{sync::{broadcast, mpsc}, time::sleep};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
-use crate::{db::DbPool, parser};
+use crate::{db::DbPool, parser, types::WsMessage};
 
 /// Chạy watcher loop. Kết thúc khi cancel token được trigger.
+/// `ws_tx`: optional broadcast sender — None khi import-all CLI (không có ai listen).
 pub async fn run_watcher(
     pool: Arc<DbPool>,
     root: PathBuf,
     mut trigger_rx: mpsc::Receiver<PathBuf>,
     cancel: CancellationToken,
+    ws_tx: Option<broadcast::Sender<WsMessage>>,
 ) -> Result<()> {
     info!("Watcher starting, root = {}", root.display());
 
@@ -93,9 +95,24 @@ pub async fn run_watcher(
             debounce.remove(&path);
             let pool_ref = Arc::clone(&pool);
             let path_clone = path.clone();
+            let ws_tx_clone = ws_tx.clone();
             tokio::task::spawn_blocking(move || {
-                if let Err(e) = process_file(&pool_ref, &path_clone) {
-                    warn!("process_file error {}: {}", path_clone.display(), e);
+                match process_file(&pool_ref, &path_clone) {
+                    Ok(Some(report)) => {
+                        if let Some(tx) = &ws_tx_clone {
+                            let _ = tx.send(WsMessage::SessionUpsert {
+                                session_id: report.session_id.clone(),
+                            });
+                            if report.inserted > 0 {
+                                let _ = tx.send(WsMessage::EventBatch {
+                                    session_id: report.session_id,
+                                    inserted: report.inserted,
+                                });
+                            }
+                        }
+                    }
+                    Ok(None) => {} // không có gì mới
+                    Err(e) => warn!("process_file error {}: {}", path_clone.display(), e),
                 }
             });
         }
@@ -104,8 +121,16 @@ pub async fn run_watcher(
     Ok(())
 }
 
+/// Báo cáo gọn từ một lần process_file — dùng để broadcast WS.
+#[derive(Debug, Clone)]
+pub struct ProcessReport {
+    pub session_id: String,
+    pub inserted: usize,
+}
+
 /// Parse file incremental và insert vào DB.
-pub fn process_file(pool: &DbPool, path: &Path) -> Result<()> {
+/// Return Ok(None) nếu file không có gì mới (cursor đã caught up), Ok(Some(report)) nếu đã insert.
+pub fn process_file(pool: &DbPool, path: &Path) -> Result<Option<ProcessReport>> {
     let file_meta = std::fs::metadata(path)
         .with_context(|| format!("stat {}", path.display()))?;
     let current_inode = file_meta.ino();
@@ -132,7 +157,7 @@ pub fn process_file(pool: &DbPool, path: &Path) -> Result<()> {
 
     // Không có gì mới
     if current_size <= offset as u64 {
-        return Ok(());
+        return Ok(None);
     }
 
     debug!(session_id = %session_id, offset, "parsing from offset");
@@ -140,7 +165,7 @@ pub fn process_file(pool: &DbPool, path: &Path) -> Result<()> {
     let batch = parser::parse_from_offset(path, offset as u64)?;
 
     if batch.events.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
 
     let path_str = path.to_string_lossy().to_string();
@@ -161,7 +186,7 @@ pub fn process_file(pool: &DbPool, path: &Path) -> Result<()> {
     // Update cursor
     crate::db::update_cursor(pool, &session_id, batch.new_offset as i64, Some(current_inode))?;
 
-    Ok(())
+    Ok(Some(ProcessReport { session_id, inserted }))
 }
 
 /// Import tất cả file JSONL trong root (scan một lần).
@@ -175,10 +200,9 @@ pub fn import_all(pool: &DbPool, root: &Path) -> Result<usize> {
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
             info!("importing {}", path.display());
-            if let Err(e) = process_file(pool, path) {
-                warn!("import error {}: {}", path.display(), e);
-            } else {
-                count += 1;
+            match process_file(pool, path) {
+                Ok(_) => count += 1,
+                Err(e) => warn!("import error {}: {}", path.display(), e),
             }
         }
     }

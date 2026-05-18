@@ -64,6 +64,23 @@ fn get_events(session_id: String, limit: Option<u32>) -> Vec<EventDto> {
     }
 }
 
+#[derive(serde::Serialize)]
+struct RuntimeInfo {
+    port: u16,
+    token: String,
+}
+
+#[tauri::command]
+fn get_runtime() -> Option<RuntimeInfo> {
+    let path = dirs::home_dir()?.join(".c2-tracker").join("runtime.json");
+    let raw = std::fs::read_to_string(&path).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    Some(RuntimeInfo {
+        port: v.get("port")?.as_u64()? as u16,
+        token: v.get("token")?.as_str()?.to_string(),
+    })
+}
+
 #[tauri::command]
 fn get_stats() -> StatsDto {
     match pool() {
@@ -149,7 +166,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_sessions,
             get_events,
-            get_stats
+            get_stats,
+            get_runtime
         ])
         .run(tauri::generate_context!())
         .expect("error while running C2-Tracker");

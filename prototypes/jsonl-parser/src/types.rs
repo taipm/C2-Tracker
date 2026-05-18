@@ -100,3 +100,16 @@ impl Default for HookResponse {
         Self { r#continue: true, suppress_output: true }
     }
 }
+
+/// Message phát broadcast cho WebSocket clients (UI realtime).
+/// Tag "kind" tương ứng case kebab-case.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum WsMessage {
+    /// Một session vừa được upsert/update — frontend nên refresh session list.
+    SessionUpsert { session_id: String },
+    /// Một batch events vừa append cho session — frontend nên refresh events
+    /// nếu đang xem session đó. Không carry data để tránh đua giữa watcher đang
+    /// commit và frontend đọc — frontend tự fetch lại để có view nhất quán.
+    EventBatch { session_id: String, inserted: usize },
+}

@@ -243,6 +243,19 @@ pub fn read_runtime_token(runtime_path: &Path) -> Result<(u16, String)> {
     Ok((port, token))
 }
 
+/// Update port trong runtime.json mà giữ nguyên token. Dùng khi serve start với
+/// --port khác với port đã lưu (vd. user đổi port hoặc lần đầu lưu sai).
+pub fn update_runtime_port(runtime_path: &Path, port: u16, token: &str) -> Result<()> {
+    let payload = serde_json::json!({ "port": port, "token": token });
+    std::fs::write(runtime_path, payload.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(runtime_path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
 /// Sinh token mới, ghi vào runtime.json (chmod 600).
 pub fn write_runtime_token(runtime_path: &Path, port: u16) -> Result<String> {
     use rand::RngCore;

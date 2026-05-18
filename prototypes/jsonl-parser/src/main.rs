@@ -129,7 +129,7 @@ async fn main() -> Result<()> {
                 cancel_clone.cancel();
             });
 
-            watcher::run_watcher(pool, root, trigger_rx, cancel).await?;
+            watcher::run_watcher(pool, root, trigger_rx, cancel, None).await?;
             Ok(())
         }
 
@@ -140,27 +140,38 @@ async fn main() -> Result<()> {
             let cancel_c1 = cancel.clone();
             let cancel_c2 = cancel.clone();
 
-            // Load hoặc sinh token
+            // Load hoặc sinh token. Luôn sync port vào runtime.json để khớp
+            // với daemon đang listen (frontend đọc port từ đó để connect WS).
             let rt_path = runtime_path();
             let token = if rt_path.exists() {
                 match db::read_runtime_token(&rt_path) {
-                    Ok((_, t)) => t,
+                    Ok((saved_port, t)) => {
+                        if saved_port != port {
+                            db::update_runtime_port(&rt_path, port, &t)?;
+                            info!("Updated runtime.json port {} → {}", saved_port, port);
+                        }
+                        t
+                    }
                     Err(_) => db::write_runtime_token(&rt_path, port)?,
                 }
             } else {
                 db::write_runtime_token(&rt_path, port)?
             };
 
-            info!("Token loaded from {}", rt_path.display());
+            info!("Token loaded from {} (port={})", rt_path.display(), port);
+
+            // WS broadcast channel — capacity 1024 đủ buffer cho burst
+            let (ws_tx, _) = tokio::sync::broadcast::channel::<crate::types::WsMessage>(1024);
 
             // Watcher
             let (trigger_tx, trigger_rx) = tokio::sync::mpsc::channel::<std::path::PathBuf>(128);
             let watcher_tx = trigger_tx.clone();
             let _trigger_tx_keep = trigger_tx; // giữ để channel open
             let pool_w = Arc::clone(&pool);
+            let ws_tx_w = ws_tx.clone();
 
             let watcher_handle = tokio::spawn(async move {
-                if let Err(e) = watcher::run_watcher(pool_w, root, trigger_rx, cancel_c1).await {
+                if let Err(e) = watcher::run_watcher(pool_w, root, trigger_rx, cancel_c1, Some(ws_tx_w)).await {
                     tracing::error!("watcher error: {}", e);
                 }
             });
@@ -170,6 +181,7 @@ async fn main() -> Result<()> {
                 pool: Arc::clone(&pool),
                 token,
                 watcher_tx,
+                ws_tx,
             };
 
             let server_handle = tokio::spawn(async move {
