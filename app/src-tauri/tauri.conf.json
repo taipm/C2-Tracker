@@ -4,10 +4,7 @@
   "version": "0.1.0",
   "identifier": "club.microai.c2tracker",
   "build": {
-    "frontendDist": "../src",
-    "devUrl": "http://localhost:1420",
-    "beforeDevCommand": "",
-    "beforeBuildCommand": ""
+    "frontendDist": "../src"
   },
   "app": {
     "macOSPrivateApi": true,
