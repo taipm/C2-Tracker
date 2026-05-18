@@ -1,0 +1,42 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "C2-Tracker",
+  "version": "0.1.0",
+  "identifier": "club.microai.c2tracker",
+  "build": {
+    "frontendDist": "../src",
+    "devUrl": "http://localhost:1420",
+    "beforeDevCommand": "",
+    "beforeBuildCommand": ""
+  },
+  "app": {
+    "macOSPrivateApi": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "C2-Tracker",
+        "width": 1280,
+        "height": 820,
+        "minWidth": 980,
+        "minHeight": 640,
+        "decorations": true,
+        "transparent": true,
+        "resizable": true,
+        "fullscreen": false,
+        "center": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": false,
+    "targets": "all",
+    "icon": [
+      "icons/icon.png"
+    ]
+  }
+}

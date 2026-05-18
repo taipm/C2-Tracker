@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>C2-Tracker</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <!-- Titlebar (custom, drag region) -->
+    <header id="titlebar" data-tauri-drag-region>
+      <div class="tb-left" data-tauri-drag-region>
+        <span class="tb-traffic" aria-hidden="true"></span>
+        <span class="tb-brand" data-tauri-drag-region>C2-Tracker</span>
+        <span class="tb-sep" data-tauri-drag-region>·</span>
+        <span class="tb-rec" id="recording-indicator">
+          <span class="rec-dot"></span>
+          <span id="rec-label">Recording (0 active)</span>
+        </span>
+      </div>
+      <div class="tb-right" data-tauri-drag-region>
+        <button class="tb-btn" id="btn-settings" title="Settings">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          <span>Settings</span>
+        </button>
+        <button class="tb-btn" id="btn-help" title="Help">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+          <span>Help</span>
+        </button>
+      </div>
+    </header>
+
+    <main id="app">
+      <!-- LEFT 4/12 -->
+      <aside id="left-pane">
+        <section class="card filter-card">
+          <div class="filter-search">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+            <input id="search-input" type="text" placeholder="Search sessions…" />
+            <kbd>⌘K</kbd>
+          </div>
+          <div class="filter-row">
+            <select id="filter-project">
+              <option>All projects</option>
+              <option>c2-tracker</option>
+              <option>llm-server</option>
+              <option>sage</option>
+            </select>
+            <select id="filter-date">
+              <option>Last 7 days</option>
+              <option>Today</option>
+              <option>Last 30 days</option>
+              <option>All time</option>
+            </select>
+          </div>
+        </section>
+
+        <section class="card sessions-card">
+          <header class="card-header">
+            <span class="card-title">Sessions</span>
+            <span class="card-meta" id="sessions-count">0</span>
+          </header>
+          <ul id="session-list" class="session-list" role="listbox"></ul>
+        </section>
+
+        <section class="card stats-card">
+          <header class="card-header">
+            <span class="card-title">Quick stats</span>
+            <span class="card-meta">today</span>
+          </header>
+          <div class="stats-grid">
+            <div class="stat">
+              <div class="stat-label">Sessions</div>
+              <div class="stat-value" id="stat-sessions">–</div>
+            </div>
+            <div class="stat">
+              <div class="stat-label">Tokens</div>
+              <div class="stat-value" id="stat-tokens">–</div>
+            </div>
+            <div class="stat">
+              <div class="stat-label">Tools</div>
+              <div class="stat-value" id="stat-tools">–</div>
+            </div>
+          </div>
+        </section>
+      </aside>
+
+      <!-- RIGHT 8/12 -->
+      <section id="right-pane">
+        <header id="session-header" class="card session-header">
+          <div class="sh-row1">
+            <span class="sh-project" id="sh-project">—</span>
+            <span class="sh-dot">·</span>
+            <span class="sh-title" id="sh-title">Select a session</span>
+          </div>
+          <div class="sh-row2" id="sh-meta">
+            <span>started —</span>
+            <span class="sh-dot">·</span>
+            <span>—</span>
+            <span class="sh-dot">·</span>
+            <span>— tokens</span>
+            <span class="sh-dot">·</span>
+            <span>— events</span>
+            <span class="sh-dot">·</span>
+            <span>model: —</span>
+          </div>
+        </header>
+
+        <div id="stream-wrap" class="stream-wrap">
+          <div id="stream" class="stream"></div>
+          <button id="jump-new" class="jump-new hidden">↓ <span id="jump-count">0</span> new</button>
+        </div>
+
+        <footer id="action-bar" class="action-bar">
+          <label class="follow-toggle">
+            <input type="checkbox" id="auto-follow" checked />
+            <span>Auto-follow</span>
+          </label>
+          <div class="actions">
+            <button class="action-btn" id="btn-copy">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+              Copy
+            </button>
+            <button class="action-btn" id="btn-export">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+              Export MD
+            </button>
+            <button class="action-btn" id="btn-open">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+              Open file
+            </button>
+          </div>
+        </footer>
+      </section>
+    </main>
+
+    <!-- Cmd+K palette -->
+    <div id="palette-backdrop" class="palette-backdrop hidden">
+      <div id="palette" class="palette" role="dialog" aria-modal="true">
+        <div class="palette-input-wrap">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          <input id="palette-input" type="text" placeholder="Search sessions, events, tools…" />
+          <kbd>ESC</kbd>
+        </div>
+        <ul id="palette-results" class="palette-results"></ul>
+        <footer class="palette-footer">
+          <span><kbd>↑↓</kbd> navigate</span>
+          <span><kbd>↵</kbd> select</span>
+          <span><kbd>ESC</kbd> close</span>
+        </footer>
+      </div>
+    </div>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

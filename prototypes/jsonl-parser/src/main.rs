@@ -1,265 +1,218 @@
-// JSONL parser prototype — verify schema thực tế trên file Claude Code transcript.
-// Mục tiêu: confirm REQ.md §5.2, phát hiện field/type chưa lường trước.
+mod db;
+mod parser;
+mod server;
+mod types;
+mod watcher;
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, Utc};
-use serde_json::Value;
-use std::{
-    collections::BTreeMap,
-    env,
-    fs::File,
-    io::{BufRead, BufReader},
-    path::Path,
-};
+use clap::{Parser, Subcommand};
+use std::{path::PathBuf, sync::Arc};
+use tokio_util::sync::CancellationToken;
+use tracing::info;
 
-#[derive(Default, Debug)]
-struct Stats {
-    total_lines: usize,
-    parse_errors: usize,
-    types: BTreeMap<String, usize>,
-    content_kinds: BTreeMap<String, usize>,
-    tools: BTreeMap<String, usize>,
-    tool_errors: BTreeMap<String, usize>,
-    models: BTreeMap<String, usize>,
-    git_branches: BTreeMap<String, usize>,
-    versions: BTreeMap<String, usize>,
-    permission_modes: BTreeMap<String, usize>,
-    attachment_kinds: BTreeMap<String, usize>,
-    input_tokens: u64,
-    output_tokens: u64,
-    cache_creation_tokens: u64,
-    cache_read_tokens: u64,
-    sidechain_events: usize,
-    first_ts: Option<DateTime<Utc>>,
-    last_ts: Option<DateTime<Utc>>,
-    session_id: Option<String>,
-    cwd: Option<String>,
-    ai_title: Option<String>,
-    summary: Option<String>,
-    unknown_top_keys: BTreeMap<String, usize>,
+#[derive(Parser)]
+#[command(name = "c2-engine", about = "C2-Tracker engine — JSONL parser + watcher + HTTP server")]
+struct Cli {
+    /// SQLite DB path (default: ~/.c2-tracker/c2.db)
+    #[arg(long, global = true)]
+    db: Option<PathBuf>,
+
+    #[command(subcommand)]
+    cmd: Cmd,
 }
 
-const KNOWN_TOP_KEYS: &[&str] = &[
-    "type", "uuid", "parentUuid", "timestamp", "sessionId", "cwd", "version",
-    "gitBranch", "userType", "isSidechain", "message", "requestId", "entrypoint",
-    "promptId", "permissionMode", "toolUseResult", "sourceToolAssistantUUID",
-    "aiTitle", "leafUuid", "summary", "attachment", "isSnapshotUpdate", "messageId",
-    "snapshot", "isCompactSummary", "isVisibleInTranscriptOnly",
-];
-
-fn record_ts(stats: &mut Stats, ts: &str) {
-    if let Ok(t) = ts.parse::<DateTime<Utc>>() {
-        stats.first_ts = Some(stats.first_ts.map_or(t, |x| x.min(t)));
-        stats.last_ts = Some(stats.last_ts.map_or(t, |x| x.max(t)));
-    }
+#[derive(Subcommand)]
+enum Cmd {
+    /// Parse một file JSONL rồi in stats (+ insert vào DB)
+    ParseOnce {
+        file: PathBuf,
+    },
+    /// Import toàn bộ session lịch sử từ root
+    ImportAll {
+        #[arg(long)]
+        root: Option<PathBuf>,
+    },
+    /// Chạy file watcher (không có HTTP server)
+    Watch {
+        #[arg(long)]
+        root: Option<PathBuf>,
+    },
+    /// Chạy watcher + HTTP server
+    Serve {
+        #[arg(long, default_value = "9786")]
+        port: u16,
+        #[arg(long)]
+        root: Option<PathBuf>,
+    },
+    /// In bearer token hiện tại
+    Token,
 }
 
-fn walk_message_content(stats: &mut Stats, msg: &Value) {
-    let Some(content) = msg.get("content") else { return };
+fn default_db() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".c2-tracker")
+        .join("c2.db")
+}
 
-    let blocks = match content {
-        Value::Array(arr) => arr.iter().collect::<Vec<_>>(),
-        Value::String(_) => {
-            *stats.content_kinds.entry("text".into()).or_default() += 1;
-            return;
+fn default_root() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".claude")
+        .join("projects")
+}
+
+fn runtime_path() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".c2-tracker")
+        .join("runtime.json")
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::from_default_env()
+                .add_directive(tracing::Level::INFO.into()),
+        )
+        .init();
+
+    let cli = Cli::parse();
+    let db_path = cli.db.unwrap_or_else(default_db);
+
+    match cli.cmd {
+        Cmd::ParseOnce { file } => cmd_parse_once(&db_path, &file),
+
+        Cmd::ImportAll { root } => {
+            let root = root.unwrap_or_else(default_root);
+            let pool = Arc::new(db::open(&db_path)?);
+            let count = watcher::import_all(&pool, &root)?;
+            println!("Imported {} files", count);
+            Ok(())
         }
-        _ => return,
-    };
 
-    for block in blocks {
-        let kind = block.get("type").and_then(|v| v.as_str()).unwrap_or("unknown");
-        *stats.content_kinds.entry(kind.into()).or_default() += 1;
+        Cmd::Watch { root } => {
+            let root = root.unwrap_or_else(default_root);
+            let pool = Arc::new(db::open(&db_path)?);
+            let cancel = CancellationToken::new();
+            let cancel_clone = cancel.clone();
 
-        match kind {
-            "tool_use" => {
-                if let Some(name) = block.get("name").and_then(|v| v.as_str()) {
-                    *stats.tools.entry(name.into()).or_default() += 1;
+            // trigger_tx phải sống suốt vòng đời của watcher
+            let (trigger_tx, trigger_rx) = tokio::sync::mpsc::channel::<std::path::PathBuf>(128);
+            let _trigger_tx_keep = trigger_tx; // giữ sender để channel không close
+
+            // Ctrl+C handler
+            tokio::spawn(async move {
+                tokio::signal::ctrl_c().await.ok();
+                info!("Received Ctrl+C, shutting down");
+                cancel_clone.cancel();
+            });
+
+            watcher::run_watcher(pool, root, trigger_rx, cancel).await?;
+            Ok(())
+        }
+
+        Cmd::Serve { port, root } => {
+            let root = root.unwrap_or_else(default_root);
+            let pool = Arc::new(db::open(&db_path)?);
+            let cancel = CancellationToken::new();
+            let cancel_c1 = cancel.clone();
+            let cancel_c2 = cancel.clone();
+
+            // Load hoặc sinh token
+            let rt_path = runtime_path();
+            let token = if rt_path.exists() {
+                match db::read_runtime_token(&rt_path) {
+                    Ok((_, t)) => t,
+                    Err(_) => db::write_runtime_token(&rt_path, port)?,
                 }
-            }
-            "tool_result" => {
-                let is_err = block.get("is_error").and_then(|v| v.as_bool()).unwrap_or(false);
-                if is_err {
-                    // tool_result không có name → đánh dấu chung "tool_result"
-                    *stats.tool_errors.entry("(unnamed)".into()).or_default() += 1;
+            } else {
+                db::write_runtime_token(&rt_path, port)?
+            };
+
+            info!("Token loaded from {}", rt_path.display());
+
+            // Watcher
+            let (trigger_tx, trigger_rx) = tokio::sync::mpsc::channel::<std::path::PathBuf>(128);
+            let watcher_tx = trigger_tx.clone();
+            let _trigger_tx_keep = trigger_tx; // giữ để channel open
+            let pool_w = Arc::clone(&pool);
+
+            let watcher_handle = tokio::spawn(async move {
+                if let Err(e) = watcher::run_watcher(pool_w, root, trigger_rx, cancel_c1).await {
+                    tracing::error!("watcher error: {}", e);
                 }
-            }
-            _ => {}
-        }
-    }
-}
+            });
 
-fn process_line(stats: &mut Stats, line: &str) -> Result<()> {
-    let v: Value = serde_json::from_str(line).context("parse JSON")?;
-    stats.total_lines += 1;
+            // HTTP server
+            let state = server::AppState {
+                pool: Arc::clone(&pool),
+                token,
+                watcher_tx,
+            };
 
-    let obj = v.as_object().context("not an object")?;
-    for k in obj.keys() {
-        if !KNOWN_TOP_KEYS.contains(&k.as_str()) {
-            *stats.unknown_top_keys.entry(k.clone()).or_default() += 1;
-        }
-    }
-
-    let ty = obj.get("type").and_then(|v| v.as_str()).unwrap_or("(no-type)");
-    *stats.types.entry(ty.into()).or_default() += 1;
-
-    if let Some(sid) = obj.get("sessionId").and_then(|v| v.as_str()) {
-        if stats.session_id.is_none() {
-            stats.session_id = Some(sid.to_string());
-        }
-    }
-    if let Some(cwd) = obj.get("cwd").and_then(|v| v.as_str()) {
-        if stats.cwd.is_none() {
-            stats.cwd = Some(cwd.to_string());
-        }
-    }
-    if let Some(ts) = obj.get("timestamp").and_then(|v| v.as_str()) {
-        record_ts(stats, ts);
-    }
-    if let Some(branch) = obj.get("gitBranch").and_then(|v| v.as_str()) {
-        if !branch.is_empty() {
-            *stats.git_branches.entry(branch.into()).or_default() += 1;
-        }
-    }
-    if let Some(ver) = obj.get("version").and_then(|v| v.as_str()) {
-        *stats.versions.entry(ver.into()).or_default() += 1;
-    }
-    if obj.get("isSidechain").and_then(|v| v.as_bool()).unwrap_or(false) {
-        stats.sidechain_events += 1;
-    }
-
-    match ty {
-        "ai-title" => {
-            if let Some(t) = obj.get("aiTitle").and_then(|v| v.as_str()) {
-                stats.ai_title = Some(t.to_string());
-            }
-        }
-        "summary" => {
-            if let Some(s) = obj.get("summary").and_then(|v| v.as_str()) {
-                stats.summary = Some(s.to_string());
-            }
-        }
-        "permission-mode" => {
-            if let Some(m) = obj.get("permissionMode").and_then(|v| v.as_str()) {
-                *stats.permission_modes.entry(m.into()).or_default() += 1;
-            }
-        }
-        "attachment" => {
-            if let Some(a) = obj.get("attachment").and_then(|v| v.as_object()) {
-                let kind = a.get("type").and_then(|v| v.as_str()).unwrap_or("?");
-                *stats.attachment_kinds.entry(kind.into()).or_default() += 1;
-            }
-        }
-        "assistant" | "user" => {
-            if let Some(msg) = obj.get("message") {
-                if let Some(model) = msg.get("model").and_then(|v| v.as_str()) {
-                    *stats.models.entry(model.into()).or_default() += 1;
+            let server_handle = tokio::spawn(async move {
+                if let Err(e) = server::run_server(state, port, cancel_c2).await {
+                    tracing::error!("server error: {}", e);
                 }
-                if let Some(usage) = msg.get("usage").and_then(|v| v.as_object()) {
-                    stats.input_tokens         += usage.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-                    stats.output_tokens        += usage.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-                    stats.cache_creation_tokens += usage.get("cache_creation_input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-                    stats.cache_read_tokens    += usage.get("cache_read_input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-                }
-                walk_message_content(stats, msg);
+            });
+
+            // Ctrl+C
+            tokio::signal::ctrl_c().await.ok();
+            info!("Received Ctrl+C, shutting down");
+            cancel.cancel();
+
+            let _ = tokio::join!(watcher_handle, server_handle);
+            info!("Shutdown complete");
+            Ok(())
+        }
+
+        Cmd::Token => {
+            let rt_path = runtime_path();
+            if rt_path.exists() {
+                let (port, token) = db::read_runtime_token(&rt_path)?;
+                println!("Port : {}", port);
+                println!("Token: {}", token);
+            } else {
+                println!("No runtime.json found at {}", rt_path.display());
+                println!("Run `c2-engine serve` to generate a token.");
             }
-        }
-        _ => {}
-    }
-
-    Ok(())
-}
-
-fn print_section(title: &str) {
-    println!("\n== {} ==", title);
-}
-
-fn print_map<V: std::fmt::Display>(map: &BTreeMap<String, V>) {
-    if map.is_empty() {
-        println!("  (none)");
-        return;
-    }
-    // Sort by value desc bằng cách collect ra vec
-    let mut entries: Vec<_> = map.iter().collect();
-    entries.sort_by(|a, b| b.1.to_string().parse::<u64>().unwrap_or(0)
-        .cmp(&a.1.to_string().parse::<u64>().unwrap_or(0)));
-    for (k, v) in entries {
-        println!("  {:>6}  {}", v.to_string(), k);
-    }
-}
-
-fn run(path: &Path) -> Result<Stats> {
-    let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
-    let reader = BufReader::new(file);
-    let mut stats = Stats::default();
-
-    for (idx, line) in reader.lines().enumerate() {
-        let line = line.with_context(|| format!("read line {}", idx + 1))?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        if let Err(e) = process_line(&mut stats, &line) {
-            stats.parse_errors += 1;
-            eprintln!("[warn] line {}: {}", idx + 1, e);
+            Ok(())
         }
     }
-    Ok(stats)
 }
 
-fn main() -> Result<()> {
-    let path = env::args().nth(1).context("usage: jsonl-parser <file.jsonl>")?;
-    let path = Path::new(&path);
-    let meta = std::fs::metadata(path)?;
-    let stats = run(path)?;
+fn cmd_parse_once(db_path: &PathBuf, file: &PathBuf) -> Result<()> {
+    let file_meta = std::fs::metadata(file)
+        .with_context(|| format!("stat {}", file.display()))?;
 
-    println!("File: {}", path.display());
-    println!("Size: {} bytes", meta.len());
-    println!("Lines parsed: {} (errors: {})", stats.total_lines, stats.parse_errors);
+    let (stats, batch) = parser::parse_file(file)?;
+    parser::print_stats(file, file_meta.len(), &stats);
 
-    print_section("Session");
-    println!("  sessionId : {:?}", stats.session_id);
-    println!("  cwd       : {:?}", stats.cwd);
-    println!("  aiTitle   : {:?}", stats.ai_title);
-    println!("  summary   : {:?}", stats.summary);
-    if let (Some(a), Some(b)) = (stats.first_ts, stats.last_ts) {
-        let dur = b - a;
-        println!("  first_ts  : {}", a);
-        println!("  last_ts   : {}", b);
-        println!("  duration  : {} min", dur.num_minutes());
-    }
-    println!("  sidechain : {} event(s)", stats.sidechain_events);
+    // Insert vào DB
+    let pool = db::open(db_path)?;
+    let path_str = file.to_string_lossy().to_string();
 
-    print_section("Event types");
-    print_map(&stats.types);
+    let session_id = file.file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("unknown")
+        .to_string();
 
-    print_section("Content kinds (in messages)");
-    print_map(&stats.content_kinds);
+    // Upsert session trước để có FK target cho events
+    db::upsert_session(&pool, &batch.meta, &path_str, &session_id)?;
+    // insert_events dùng INSERT OR IGNORE → events đã có uuid sẽ bị skip (idempotent)
+    // tokens trong session có thể bị double-count nếu parse_once chạy 2 lần — OK cho diagnostic cmd
+    let (inserted, dups) = db::insert_events(&pool, &session_id, &batch.events)?;
 
-    print_section("Tools used");
-    print_map(&stats.tools);
+    // Lưu offset cuối
+    use std::os::unix::fs::MetadataExt;
+    db::update_cursor(&pool, &session_id, batch.new_offset as i64, Some(file_meta.ino()))?;
 
-    print_section("Models");
-    print_map(&stats.models);
-
-    print_section("Git branches");
-    print_map(&stats.git_branches);
-
-    print_section("Claude Code versions");
-    print_map(&stats.versions);
-
-    print_section("Permission modes");
-    print_map(&stats.permission_modes);
-
-    print_section("Attachment kinds");
-    print_map(&stats.attachment_kinds);
-
-    print_section("Tokens (sum)");
-    println!("  input         : {}", stats.input_tokens);
-    println!("  output        : {}", stats.output_tokens);
-    println!("  cache_creation: {}", stats.cache_creation_tokens);
-    println!("  cache_read    : {}", stats.cache_read_tokens);
-
-    print_section("Unknown top-level keys (cần bổ sung schema)");
-    print_map(&stats.unknown_top_keys);
+    println!("\n== DB insert ==");
+    println!("  inserted  : {}", inserted);
+    println!("  duplicates: {}", dups);
+    println!("  db path   : {}", db_path.display());
 
     Ok(())
 }
