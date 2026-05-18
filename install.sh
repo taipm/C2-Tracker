@@ -1,50 +1,43 @@
 #!/usr/bin/env bash
 # C2-Tracker installer — one-line install:
 #
-#   # Nếu có Gitea token (lấy tại https://git.microai.club/user/settings/applications):
-#   curl -fsSL -H "Authorization: token $GITEA_TOKEN" \
-#     https://git.microai.club/taipm/C2-Tracker/raw/branch/main/install.sh | \
-#     GITEA_TOKEN=$GITEA_TOKEN bash
-#
-#   # Nếu đã có ~/.netrc với entry cho git.microai.club:
-#   curl -fsSL --netrc https://git.microai.club/taipm/C2-Tracker/raw/branch/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/taipm/C2-Tracker/main/install.sh | bash
 #
 # Env vars:
-#   GITEA_TOKEN      Personal Access Token Gitea (ưu tiên hơn netrc)
 #   C2_VERSION       (default: v0.0.1)
 #   C2_INSTALL_DIR   (default: ~/.c2-tracker)
 #   C2_SKIP_HOOKS=1  bỏ qua bước install hooks vào ~/.claude/settings.json
 #   C2_SKIP_AGENT=1  bỏ qua LaunchAgent (chạy daemon thủ công)
+#   C2_SOURCE        (default: github) — đặt "gitea" để tải từ git.microai.club (cần GITEA_TOKEN hoặc netrc)
 
 set -euo pipefail
 
-# ── Auth strategy ─────────────────────────────────────────────────────────────
-# Gitea instance bật REQUIRE_SIGNIN_VIEW → public download cần auth.
+# ── Source selection ──────────────────────────────────────────────────────────
+SOURCE="${C2_SOURCE:-github}"
 AUTH_FLAGS=()
-if [[ -n "${GITEA_TOKEN:-}" ]]; then
-  AUTH_FLAGS=(-H "Authorization: token $GITEA_TOKEN")
-elif [[ -f "$HOME/.netrc" ]] && grep -q "git.microai.club" "$HOME/.netrc" 2>/dev/null; then
-  AUTH_FLAGS=(--netrc)
-else
-  cat >&2 <<'EOH'
 
-  ✗ Cần auth để tải từ git.microai.club (instance này yêu cầu login)
-
-  Cách 1: export GITEA_TOKEN trước khi chạy installer:
-    1. Mở https://git.microai.club/user/settings/applications
-    2. Generate token với scope "read:repository"
-    3. Chạy:
-       GITEA_TOKEN=xxxxx bash -c "$(curl -fsSL -H \"Authorization: token \$GITEA_TOKEN\" \
-         https://git.microai.club/taipm/C2-Tracker/raw/branch/main/install.sh)"
-
-  Cách 2: cài netrc 1 lần (cho macOS/Linux), rồi chạy installer:
-    echo "machine git.microai.club login YOUR_USER password YOUR_TOKEN" >> ~/.netrc
-    chmod 600 ~/.netrc
-    curl -fsSL --netrc https://git.microai.club/taipm/C2-Tracker/raw/branch/main/install.sh | bash
-
-EOH
-  exit 1
-fi
+case "$SOURCE" in
+  github)
+    # Public GitHub mirror — anonymous, không cần auth
+    RELEASE_BASE="https://github.com/taipm/C2-Tracker/releases/download"
+    ;;
+  gitea)
+    # Self-hosted Gitea (internal) — REQUIRE_SIGNIN_VIEW bật, cần auth
+    RELEASE_BASE="https://git.microai.club/taipm/C2-Tracker/releases/download"
+    if [[ -n "${GITEA_TOKEN:-}" ]]; then
+      AUTH_FLAGS=(-H "Authorization: token $GITEA_TOKEN")
+    elif [[ -f "$HOME/.netrc" ]] && grep -q "git.microai.club" "$HOME/.netrc" 2>/dev/null; then
+      AUTH_FLAGS=(--netrc)
+    else
+      echo "✗ C2_SOURCE=gitea cần GITEA_TOKEN hoặc ~/.netrc entry cho git.microai.club" >&2
+      exit 1
+    fi
+    ;;
+  *)
+    echo "✗ C2_SOURCE phải là 'github' hoặc 'gitea' (đang là: $SOURCE)" >&2
+    exit 1
+    ;;
+esac
 
 # ── Config ────────────────────────────────────────────────────────────────────
 VERSION="${C2_VERSION:-v0.0.1}"
@@ -78,7 +71,7 @@ case "$OS-$ARCH" in
     ;;
 esac
 
-URL="https://git.microai.club/taipm/C2-Tracker/releases/download/$VERSION/c2-tracker-$VERSION-$TARGET.tar.gz"
+URL="$RELEASE_BASE/$VERSION/c2-tracker-$VERSION-$TARGET.tar.gz"
 
 cat <<EOF
 
@@ -86,6 +79,7 @@ cat <<EOF
   ║   C2-Tracker Installer        ║
   ╚═══════════════════════════════╝
 
+  Source  : $SOURCE
   Version : $VERSION
   Target  : $TARGET
   Dest    : $INSTALL_DIR
@@ -98,8 +92,9 @@ TMPDIR=$(mktemp -d)
 trap "rm -rf '$TMPDIR'" EXIT
 
 say "Tải tarball..."
-if ! curl -fsSL -A "$UA" "${AUTH_FLAGS[@]}" "$URL" -o "$TMPDIR/release.tar.gz"; then
-  err "Tải release thất bại từ $URL (kiểm tra token / netrc auth)"
+# Expand AUTH_FLAGS safely khi rỗng (set -u nghiêm cấm unbound array)
+if ! curl -fsSL -A "$UA" ${AUTH_FLAGS[@]+"${AUTH_FLAGS[@]}"} "$URL" -o "$TMPDIR/release.tar.gz"; then
+  err "Tải release thất bại từ $URL"
 fi
 SIZE=$(stat -f%z "$TMPDIR/release.tar.gz" 2>/dev/null || stat -c%s "$TMPDIR/release.tar.gz")
 ok "Đã tải $(( SIZE / 1024 )) KB"
@@ -191,7 +186,7 @@ cat <<EOF
     4. Bắt đầu Claude Code session — events sẽ tự track qua hooks
 
   Build UI desktop (tuỳ chọn, ~10 phút):
-    git clone https://git.microai.club/taipm/C2-Tracker.git
+    git clone https://github.com/taipm/C2-Tracker.git
     cd C2-Tracker/app && python3 gen_icons.py && cargo tauri dev
 
   Gỡ cài đặt:

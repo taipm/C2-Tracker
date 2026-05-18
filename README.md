@@ -40,33 +40,41 @@ Claude Code session
 
 ## Cài đặt
 
-### Cách nhanh nhất — one-line installer (~30 giây)
-
-Yêu cầu: macOS arm64 + token Gitea (lấy tại https://git.microai.club/user/settings/applications).
+### Cách nhanh nhất — one-line installer (~30 giây, anonymous)
 
 ```bash
-# Tạo PAT Gitea với scope "read:repository", rồi:
-export GITEA_TOKEN=ghp_xxxxxxxxxxxxx
-bash -c "$(curl -fsSL -H "Authorization: token $GITEA_TOKEN" \
-  https://git.microai.club/taipm/C2-Tracker/raw/branch/main/install.sh)"
+curl -fsSL https://raw.githubusercontent.com/taipm/C2-Tracker/main/install.sh | bash
 ```
 
-Hoặc nếu đã có `~/.netrc` cho `git.microai.club`:
-```bash
-curl -fsSL --netrc https://git.microai.club/taipm/C2-Tracker/raw/branch/main/install.sh | bash
-```
+Cần macOS Apple Silicon + Claude Code đã cài (tùy chọn — hook tự skip nếu chưa có).
 
 Installer tự động:
-1. Tải binary `c2-engine` về `~/.c2-tracker/bin/`
-2. Cài LaunchAgent (daemon auto-start)
-3. Cài hooks vào `~/.claude/settings.json` (nếu Claude Code đã có)
-4. Thêm `~/.c2-tracker/bin` vào `PATH` qua `~/.zshrc` (hoặc shell rc tương ứng)
+1. Tải binary `c2-engine` về `~/.c2-tracker/bin/` (từ GitHub release, không cần auth)
+2. Cài LaunchAgent (daemon auto-start mỗi lần boot)
+3. Cài hooks vào `~/.claude/settings.json` nếu Claude Code đã có
+4. Thêm `~/.c2-tracker/bin` vào `PATH` qua `~/.zshrc` / `~/.bashrc` / fish config
 
-Opt-out env vars:
-- `C2_SKIP_HOOKS=1` không cài hooks
-- `C2_SKIP_AGENT=1` không cài LaunchAgent
-- `C2_VERSION=vX.Y.Z` chọn version khác (default `v0.0.1`)
-- `C2_INSTALL_DIR=/path` đổi nơi cài (default `~/.c2-tracker`)
+#### Tùy chỉnh
+
+```bash
+# Skip hooks (cài thủ công sau)
+curl -fsSL https://raw.githubusercontent.com/taipm/C2-Tracker/main/install.sh | C2_SKIP_HOOKS=1 bash
+
+# Skip LaunchAgent (chạy daemon thủ công bằng c2-engine serve)
+curl -fsSL https://raw.githubusercontent.com/taipm/C2-Tracker/main/install.sh | C2_SKIP_AGENT=1 bash
+
+# Đổi version / install dir
+curl -fsSL https://raw.githubusercontent.com/taipm/C2-Tracker/main/install.sh | \
+  C2_VERSION=v0.0.1 C2_INSTALL_DIR=/opt/c2 bash
+```
+
+#### Tải từ Gitea mirror internal (`git.microai.club`)
+
+Cần `GITEA_TOKEN` hoặc `~/.netrc` entry:
+```bash
+GITEA_TOKEN=xxx bash -c "$(curl -fsSL -H "Authorization: token $GITEA_TOKEN" \
+  https://git.microai.club/taipm/C2-Tracker/raw/branch/main/install.sh)" -- C2_SOURCE=gitea
+```
 
 ---
 
@@ -106,7 +114,7 @@ Kiểm tra: `launchctl list | grep c2tracker` phải thấy `club.microai.c2trac
 Bắt buộc nếu muốn dùng giao diện desktop. ~5-10 phút lần đầu (Rust + Tauri compile).
 
 ```bash
-git clone https://git.microai.club/taipm/C2-Tracker.git
+git clone https://github.com/taipm/C2-Tracker.git
 cd C2-Tracker
 
 # 1. Build engine release
