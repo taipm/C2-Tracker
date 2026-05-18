@@ -64,6 +64,19 @@ pub struct EventDto {
     pub timestamp: Option<i64>,
 }
 
+/// Issue DTO — attachment hook_non_blocking_error events kèm session context.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IssueDto {
+    pub id: i64,
+    pub session_id: String,
+    pub session_title: String,
+    pub attachment_kind: String,
+    pub timestamp: Option<i64>,
+    pub timestamp_label: String,
+    /// 300 ký tự đầu của field content trong DB
+    pub snippet: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatsDto {
     pub sessions_today: u32,
@@ -211,7 +224,7 @@ pub fn get_sessions_impl(pool: &DbPool) -> Result<Vec<SessionDto>, String> {
     Ok(sessions)
 }
 
-pub fn get_events_impl(pool: &DbPool, session_id: &str, limit: Option<u32>) -> Result<Vec<EventDto>, String> {
+pub fn get_events_impl(pool: &DbPool, session_id: &str, limit: Option<u32>, before_id: Option<i64>) -> Result<Vec<EventDto>, String> {
     let conn = pool.get().map_err(|e| e.to_string())?;
     let lim = limit.unwrap_or(500) as i64;
 
@@ -220,89 +233,185 @@ pub fn get_events_impl(pool: &DbPool, session_id: &str, limit: Option<u32>) -> R
     // Attachment (hook events) defer Phase 2.
     // Query DESC để lấy N events MỚI NHẤT (không phải đầu session), sau đó reverse
     // ở Rust trước khi return để frontend render chronological ASC.
+    // before_id: khi có, chỉ lấy events có id < before_id (phân trang scroll-up).
+    let sql = if before_id.is_some() {
+        "SELECT id, session_id, \"type\", category, content_kind,
+                tool_name, tool_use_id, is_error, text_preview,
+                content, timestamp, duration_ms,
+                input_tokens, output_tokens
+         FROM events
+         WHERE session_id = ?1
+           AND category = 'content'
+           AND id < ?3
+         ORDER BY timestamp DESC, id DESC
+         LIMIT ?2"
+    } else {
+        "SELECT id, session_id, \"type\", category, content_kind,
+                tool_name, tool_use_id, is_error, text_preview,
+                content, timestamp, duration_ms,
+                input_tokens, output_tokens
+         FROM events
+         WHERE session_id = ?1
+           AND category = 'content'
+         ORDER BY timestamp DESC, id DESC
+         LIMIT ?2"
+    };
+
+    let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
+
+    // Collect raw tuples trước; tách query khỏi processing để tránh vấn đề lifetime
+    let raw_rows: Vec<(i64, String, String, String, Option<String>, Option<String>, Option<String>, i64, Option<String>, String, Option<i64>, Option<i64>, Option<i64>, Option<i64>)> = if let Some(bid) = before_id {
+        stmt.query_map(params![session_id, lim, bid], |row| Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, Option<String>>(4)?,
+            row.get::<_, Option<String>>(5)?,
+            row.get::<_, Option<String>>(6)?,
+            row.get::<_, i64>(7)?,
+            row.get::<_, Option<String>>(8)?,
+            row.get::<_, String>(9)?,
+            row.get::<_, Option<i64>>(10)?,
+            row.get::<_, Option<i64>>(11)?,
+            row.get::<_, Option<i64>>(12)?,
+            row.get::<_, Option<i64>>(13)?,
+        )))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<_, rusqlite::Error>>()
+        .map_err(|e| e.to_string())?
+    } else {
+        stmt.query_map(params![session_id, lim], |row| Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, Option<String>>(4)?,
+            row.get::<_, Option<String>>(5)?,
+            row.get::<_, Option<String>>(6)?,
+            row.get::<_, i64>(7)?,
+            row.get::<_, Option<String>>(8)?,
+            row.get::<_, String>(9)?,
+            row.get::<_, Option<i64>>(10)?,
+            row.get::<_, Option<i64>>(11)?,
+            row.get::<_, Option<i64>>(12)?,
+            row.get::<_, Option<i64>>(13)?,
+        )))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<_, rusqlite::Error>>()
+        .map_err(|e| e.to_string())?
+    };
+
+    let mut events: Vec<EventDto> = raw_rows
+        .into_iter()
+        .map(|(id, sid, ev_type, category, content_kind, tool_name, tool_use_id,
+               is_error_int, text_preview, content, timestamp, duration_ms,
+               _input_tokens, output_tokens)| {
+            let kind = map_kind(&ev_type, content_kind.as_deref());
+            let text = text_preview.unwrap_or_default();
+            let timestamp_label = fmt_time(timestamp);
+            let (tool_input, tool_output) = extract_tool_io(&kind, &content);
+            let (thinking_duration_ms, thinking_tokens) = if kind == "thinking" {
+                (
+                    duration_ms.map(|d| d.min(u32::MAX as i64) as u32),
+                    output_tokens.map(|t| t.min(u32::MAX as i64) as u32),
+                )
+            } else {
+                (None, None)
+            };
+            EventDto {
+                id,
+                session_id: sid,
+                kind,
+                timestamp_label,
+                text,
+                tool_name,
+                tool_input,
+                tool_output,
+                is_error: is_error_int != 0,
+                thinking_duration_ms,
+                thinking_tokens,
+                content,
+                category,
+                content_kind,
+                tool_use_id,
+                timestamp,
+            }
+        })
+        .collect();
+
+    // Reverse: query DESC để có N events mới nhất → frontend cần chronological ASC
+    events.reverse();
+    Ok(events)
+}
+
+pub fn get_issues_impl(pool: &DbPool, limit: Option<u32>) -> Result<Vec<IssueDto>, String> {
+    let conn = pool.get().map_err(|e| e.to_string())?;
+    let lim = limit.unwrap_or(50) as i64;
+
     let mut stmt = conn
         .prepare(
-            "SELECT id, session_id, \"type\", category, content_kind,
-                    tool_name, tool_use_id, is_error, text_preview,
-                    content, timestamp, duration_ms,
-                    input_tokens, output_tokens
-             FROM events
-             WHERE session_id = ?1
-               AND category = 'content'
-             ORDER BY timestamp DESC, id DESC
-             LIMIT ?2",
+            "SELECT e.id, e.session_id,
+                    COALESCE(NULLIF(s.ai_title, ''), s.project_name, '(unknown)') AS session_title,
+                    COALESCE(e.attachment_kind, 'hook_non_blocking_error') AS attachment_kind,
+                    e.timestamp,
+                    e.content
+             FROM events e
+             JOIN sessions s ON e.session_id = s.id
+             WHERE e.category = 'attachment'
+               AND e.attachment_kind = 'hook_non_blocking_error'
+             ORDER BY e.timestamp DESC, e.id DESC
+             LIMIT ?1",
         )
         .map_err(|e| e.to_string())?;
 
-    let rows = stmt
-        .query_map(params![session_id, lim], |row| {
+    let raw: Vec<(i64, String, String, String, Option<i64>, String)> = stmt
+        .query_map(params![lim], |row| {
             Ok((
-                row.get::<_, i64>(0)?,               // id
-                row.get::<_, String>(1)?,             // session_id
-                row.get::<_, String>(2)?,             // type
-                row.get::<_, String>(3)?,             // category
-                row.get::<_, Option<String>>(4)?,     // content_kind
-                row.get::<_, Option<String>>(5)?,     // tool_name
-                row.get::<_, Option<String>>(6)?,     // tool_use_id
-                row.get::<_, i64>(7)?,                // is_error
-                row.get::<_, Option<String>>(8)?,     // text_preview
-                row.get::<_, String>(9)?,             // content
-                row.get::<_, Option<i64>>(10)?,       // timestamp
-                row.get::<_, Option<i64>>(11)?,       // duration_ms
-                row.get::<_, Option<i64>>(12)?,       // input_tokens
-                row.get::<_, Option<i64>>(13)?,       // output_tokens
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Option<i64>>(4)?,
+                row.get::<_, String>(5)?,
             ))
         })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<_, _>>()
+        .map_err(|e: rusqlite::Error| e.to_string())?;
+
+    let issues = raw
+        .into_iter()
+        .map(|(id, session_id, session_title, attachment_kind, timestamp, content)| {
+            let snippet: String = content.chars().take(300).collect();
+            let timestamp_label = fmt_time(timestamp);
+            IssueDto {
+                id,
+                session_id,
+                session_title,
+                attachment_kind,
+                timestamp,
+                timestamp_label,
+                snippet,
+            }
+        })
+        .collect();
+
+    Ok(issues)
+}
+
+pub fn get_issue_count_impl(pool: &DbPool) -> Result<u32, String> {
+    let conn = pool.get().map_err(|e| e.to_string())?;
+    let count: u32 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM events
+             WHERE category = 'attachment'
+               AND attachment_kind = 'hook_non_blocking_error'",
+            [],
+            |row| row.get(0),
+        )
         .map_err(|e| e.to_string())?;
-
-    let mut events = Vec::new();
-    for row in rows {
-        let (id, sid, ev_type, category, content_kind, tool_name, tool_use_id,
-             is_error_int, text_preview, content, timestamp, duration_ms,
-             input_tokens, output_tokens) =
-            row.map_err(|e| e.to_string())?;
-
-        // Map event type + content_kind → frontend "kind"
-        let kind = map_kind(&ev_type, content_kind.as_deref());
-
-        let text = text_preview.unwrap_or_default();
-        let timestamp_label = fmt_time(timestamp);
-
-        // Thiết lập tool_input / tool_output từ raw content JSON
-        let (tool_input, tool_output) = extract_tool_io(&kind, &content);
-
-        // thinking tokens từ output_tokens (content_kind = "thinking")
-        let (thinking_duration_ms, thinking_tokens) = if kind == "thinking" {
-            (
-                duration_ms.map(|d| d.min(u32::MAX as i64) as u32),
-                output_tokens.map(|t| t.min(u32::MAX as i64) as u32),
-            )
-        } else {
-            (None, None)
-        };
-
-        events.push(EventDto {
-            id,
-            session_id: sid,
-            kind,
-            timestamp_label,
-            text,
-            tool_name,
-            tool_input,
-            tool_output,
-            is_error: is_error_int != 0,
-            thinking_duration_ms,
-            thinking_tokens,
-            content,
-            category,
-            content_kind,
-            tool_use_id,
-            timestamp,
-        });
-    }
-    // Reverse: query DESC để có 500 events mới nhất → frontend cần chronological ASC
-    events.reverse();
-    Ok(events)
+    Ok(count)
 }
 
 pub fn get_stats_impl(pool: &DbPool) -> Result<StatsDto, String> {
@@ -470,11 +579,70 @@ mod tests {
             return;
         }
         let session_id = &sessions[0].id;
-        let events = get_events_impl(&pool, session_id, Some(50)).expect("get_events");
+        let events = get_events_impl(&pool, session_id, Some(50), None).expect("get_events");
         eprintln!("session {} → {} events (limit 50)", session_id, events.len());
         for ev in &events {
             assert!(!ev.kind.is_empty(), "kind must not be empty");
         }
+    }
+
+    #[test]
+    fn test_get_events_before_id_pagination() {
+        let db_path = test_db_path();
+        if !db_path.exists() {
+            eprintln!("SKIP: DB not found.");
+            return;
+        }
+        let pool = open_readonly(&db_path).expect("open pool");
+        let sessions = get_sessions_impl(&pool).expect("get_sessions");
+        if sessions.is_empty() {
+            eprintln!("SKIP: no sessions.");
+            return;
+        }
+        let session_id = &sessions[0].id;
+        // Lấy 50 events mới nhất (no before_id)
+        let first_page = get_events_impl(&pool, session_id, Some(50), None).expect("first page");
+        if first_page.len() < 2 {
+            eprintln!("SKIP: not enough events ({}) for pagination test.", first_page.len());
+            return;
+        }
+        // before_id = id của event đầu tiên trong first_page (oldest of the 50)
+        let oldest_id = first_page[0].id;
+        let older_page = get_events_impl(&pool, session_id, Some(50), Some(oldest_id)).expect("older page");
+        // Tất cả events trong older_page phải có id < oldest_id
+        for ev in &older_page {
+            assert!(ev.id < oldest_id, "before_id filter broken: ev.id={} >= oldest_id={}", ev.id, oldest_id);
+        }
+        eprintln!("pagination: first_page[0].id={} older_page.len()={}", oldest_id, older_page.len());
+    }
+
+    #[test]
+    fn test_get_issues_real_db() {
+        // Dùng polish.db nếu có (có hook_non_blocking_error events), fallback wire-test.db
+        let db_path = if let Ok(p) = std::env::var("C2_TEST_DB") {
+            PathBuf::from(p)
+        } else if std::path::Path::new("/tmp/polish.db").exists() {
+            PathBuf::from("/tmp/polish.db")
+        } else {
+            PathBuf::from("/tmp/wire-test.db")
+        };
+
+        if !db_path.exists() {
+            eprintln!("SKIP: DB not found at {}.", db_path.display());
+            return;
+        }
+        let pool = open_readonly(&db_path).expect("open pool");
+        let issues = get_issues_impl(&pool, Some(20)).expect("get_issues");
+        eprintln!("get_issues → {} rows from {}", issues.len(), db_path.display());
+        for issue in &issues {
+            assert!(!issue.session_id.is_empty());
+            assert!(!issue.attachment_kind.is_empty());
+            assert!(issue.snippet.chars().count() <= 300, "snippet too long: {} chars", issue.snippet.chars().count());
+        }
+        let count = get_issue_count_impl(&pool).expect("get_issue_count");
+        eprintln!("get_issue_count → {}", count);
+        // count tổng phải ≥ số issues fetched với limit
+        assert!(count as usize >= issues.len());
     }
 
     #[test]

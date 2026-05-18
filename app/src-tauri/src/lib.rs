@@ -1,7 +1,7 @@
 mod db;
 mod mock;
 
-use db::{DbPool, EventDto, SessionDto, StatsDto};
+use db::{DbPool, EventDto, IssueDto, SessionDto, StatsDto};
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
@@ -51,16 +51,39 @@ fn get_sessions() -> Vec<SessionDto> {
 }
 
 #[tauri::command]
-fn get_events(session_id: String, limit: Option<u32>) -> Vec<EventDto> {
+fn get_events(session_id: String, limit: Option<u32>, before_id: Option<i64>) -> Vec<EventDto> {
     match pool() {
-        Some(p) => match db::get_events_impl(p, &session_id, limit) {
+        Some(p) => match db::get_events_impl(p, &session_id, limit, before_id) {
             Ok(events) => events,
             Err(e) => {
                 eprintln!("[c2-tracker] get_events error: {e}");
-                mock_events_as_dto(&session_id)
+                // before_id phân trang không fallback mock (mock không có pagination)
+                if before_id.is_some() { vec![] } else { mock_events_as_dto(&session_id) }
             }
         },
-        None => mock_events_as_dto(&session_id),
+        None => if before_id.is_some() { vec![] } else { mock_events_as_dto(&session_id) },
+    }
+}
+
+#[tauri::command]
+fn get_issues(limit: Option<u32>) -> Vec<IssueDto> {
+    match pool() {
+        Some(p) => match db::get_issues_impl(p, limit) {
+            Ok(issues) => issues,
+            Err(e) => {
+                eprintln!("[c2-tracker] get_issues error: {e}");
+                vec![]
+            }
+        },
+        None => vec![],
+    }
+}
+
+#[tauri::command]
+fn get_issue_count() -> u32 {
+    match pool() {
+        Some(p) => db::get_issue_count_impl(p).unwrap_or(0),
+        None => 0,
     }
 }
 
@@ -167,7 +190,9 @@ pub fn run() {
             get_sessions,
             get_events,
             get_stats,
-            get_runtime
+            get_runtime,
+            get_issues,
+            get_issue_count
         ])
         .run(tauri::generate_context!())
         .expect("error while running C2-Tracker");

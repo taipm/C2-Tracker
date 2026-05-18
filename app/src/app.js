@@ -19,6 +19,8 @@ function browserFallback(cmd, args) {
   if (cmd === "get_sessions") return Promise.resolve(BROWSER_MOCK.sessions);
   if (cmd === "get_events") return Promise.resolve(BROWSER_MOCK.events[args.sessionId] || []);
   if (cmd === "get_stats") return Promise.resolve(BROWSER_MOCK.stats);
+  if (cmd === "get_issues") return Promise.resolve([]);
+  if (cmd === "get_issue_count") return Promise.resolve(0);
   return Promise.reject(new Error("unknown command: " + cmd));
 }
 
@@ -47,6 +49,13 @@ const state = {
   paletteOpen: false,
   paletteResults: [],
   paletteIndex: 0,
+  // Feature 2: scroll-up pagination
+  loadingOlder: false,
+  reachedOldest: false,
+  // Feature 3: issues panel
+  activePanel: "stream", // "stream" | "issues"
+  issues: [],
+  issueCount: 0,
 };
 
 async function init() {
@@ -75,12 +84,107 @@ async function init() {
 
   attachHandlers();
   startWebSocket();
+  setupVisibilityPause();
+  attachScrollPagination();
 }
 
 let lastEventMaxId = 0;
 let ws = null;
 let wsReconnectTimer = null;
 let wsBackoffMs = 1000;
+
+// ── Feature 1: Page Visibility ────────────────────────────────────────────────
+
+function setupVisibilityPause() {
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") {
+      // Đóng WS sạch, huỷ reconnect timer (tiết kiệm pin)
+      if (wsReconnectTimer) {
+        clearTimeout(wsReconnectTimer);
+        wsReconnectTimer = null;
+      }
+      if (ws) {
+        ws.onclose = null; // prevent scheduleReconnect from firing
+        ws.close(1000, "tab hidden");
+        ws = null;
+      }
+      setHealthDot(false);
+    } else {
+      // Tab trở lại visible: reconnect + refresh full data
+      startWebSocket();
+      if (state.activeSessionId) {
+        invoke("get_events", { sessionId: state.activeSessionId })
+          .then((evs) => {
+            state.events = evs;
+            state.reachedOldest = false;
+            lastEventMaxId = evs.length ? evs[evs.length - 1].id : 0;
+            renderCurrentPanel();
+          })
+          .catch((e) => console.warn("visibility refresh events failed:", e));
+      }
+      refreshSessionsAndStats();
+    }
+  });
+}
+
+// ── Feature 2: Scroll-up pagination ──────────────────────────────────────────
+
+let scrollPaginationThrottle = null;
+
+function attachScrollPagination() {
+  const streamEl = document.getElementById("stream");
+  if (!streamEl) return;
+  streamEl.addEventListener("scroll", () => {
+    if (state.activePanel !== "stream") return;
+    if (state.loadingOlder || state.reachedOldest) return;
+    if (streamEl.scrollTop > 80) return;
+    if (scrollPaginationThrottle) return;
+
+    scrollPaginationThrottle = setTimeout(() => {
+      scrollPaginationThrottle = null;
+    }, 500);
+
+    loadOlderEvents(streamEl);
+  });
+}
+
+async function loadOlderEvents(streamEl) {
+  if (!state.activeSessionId || state.events.length === 0) return;
+  if (state.loadingOlder || state.reachedOldest) return;
+
+  state.loadingOlder = true;
+  const oldestId = state.events[0].id;
+
+  try {
+    const older = await invoke("get_events", {
+      sessionId: state.activeSessionId,
+      beforeId: oldestId,
+    });
+
+    if (older.length === 0) {
+      state.reachedOldest = true;
+      state.loadingOlder = false;
+      return;
+    }
+
+    // Prepend và giữ scroll position
+    const prevHeight = streamEl.scrollHeight;
+    state.events = [...older, ...state.events];
+    renderCurrentPanel();
+    // Adjust scrollTop để user không thấy giật
+    requestAnimationFrame(() => {
+      streamEl.scrollTop += streamEl.scrollHeight - prevHeight;
+    });
+
+    if (older.length < 500) {
+      state.reachedOldest = true;
+    }
+  } catch (e) {
+    console.warn("loadOlderEvents failed:", e);
+  } finally {
+    state.loadingOlder = false;
+  }
+}
 
 async function startWebSocket() {
   let runtime;
@@ -155,14 +259,17 @@ async function handleWsMessage(raw) {
       try {
         const evs = await invoke("get_events", { sessionId: state.activeSessionId });
         state.events = evs;
+        state.reachedOldest = false;
         lastEventMaxId = evs.length ? evs[evs.length - 1].id : 0;
-        renderStream(state.events, document.getElementById("stream"), { autoFollow: state.autoFollow });
+        renderCurrentPanel();
       } catch (e) {
         console.warn("get_events failed:", e);
       }
     }
     // Vẫn refresh stats + sidebar (last_event_at, token_count tăng)
     await refreshSessionsAndStats({ skipReorderActive: true });
+    // Cập nhật issue count badge
+    refreshIssueCount();
   }
 }
 
@@ -191,6 +298,110 @@ async function refreshSessionsAndStats(_opts = {}) {
   }
 }
 
+// ── Feature 3: Issues panel helpers ──────────────────────────────────────────
+
+async function refreshIssueCount() {
+  try {
+    state.issueCount = await invoke("get_issue_count");
+    updateIssuesBadge();
+  } catch (e) {
+    // ignore
+  }
+}
+
+function updateIssuesBadge() {
+  const btn = document.getElementById("btn-panel-issues");
+  if (!btn) return;
+  const n = state.issueCount;
+  btn.textContent = n > 0 ? `Issues (${n})` : "Issues";
+}
+
+async function switchPanel(panel) {
+  state.activePanel = panel;
+  // Update button active states
+  document.getElementById("btn-panel-stream")?.classList.toggle("active", panel === "stream");
+  document.getElementById("btn-panel-issues")?.classList.toggle("active", panel === "issues");
+
+  if (panel === "issues") {
+    try {
+      state.issues = await invoke("get_issues", { limit: 50 });
+    } catch (e) {
+      state.issues = [];
+      console.warn("get_issues failed:", e);
+    }
+  }
+  renderCurrentPanel();
+}
+
+function renderCurrentPanel() {
+  if (state.activePanel === "issues") {
+    renderIssuesPanel(state.issues, document.getElementById("stream"));
+  } else {
+    renderStream(state.events, document.getElementById("stream"), { autoFollow: state.autoFollow });
+  }
+}
+
+function renderIssuesPanel(issues, root) {
+  root.textContent = "";
+  if (!issues || issues.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "empty";
+    const icon = document.createElement("div");
+    icon.className = "empty-icon";
+    icon.textContent = "•";
+    const title = document.createElement("div");
+    title.className = "empty-title";
+    title.textContent = "Khong co loi hook nao";
+    const hint = document.createElement("div");
+    hint.className = "empty-hint";
+    hint.textContent = "hook_non_blocking_error se hien thi o day.";
+    empty.append(icon, title, hint);
+    root.appendChild(empty);
+    return;
+  }
+
+  issues.forEach((issue) => {
+    const card = document.createElement("div");
+    card.className = "event issue-card";
+
+    const gutter = document.createElement("div");
+    gutter.className = "ev-gutter";
+
+    const kindBadge = document.createElement("span");
+    kindBadge.className = "ev-kind tool_result is-error";
+    kindBadge.textContent = "[hook_error]";
+
+    const time = document.createElement("span");
+    time.className = "ev-time";
+    time.textContent = issue.timestamp_label;
+
+    gutter.append(kindBadge, time);
+
+    const body = document.createElement("div");
+    body.className = "ev-body";
+
+    const sessionLine = document.createElement("div");
+    sessionLine.style.cssText = "font-size:11px;color:var(--text-mute);margin-bottom:4px;";
+    const sessionLink = document.createElement("span");
+    sessionLink.style.cssText = "cursor:pointer;text-decoration:underline;color:var(--accent);";
+    sessionLink.textContent = issue.session_title || issue.session_id;
+    sessionLink.addEventListener("click", () => selectSession(issue.session_id));
+    sessionLine.append(sessionLink);
+
+    const kindLine = document.createElement("div");
+    kindLine.style.cssText = "font-size:11px;color:var(--text-mute);margin-bottom:6px;";
+    kindLine.textContent = issue.attachment_kind;
+
+    const snippet = document.createElement("pre");
+    snippet.style.cssText = "font-family:var(--font-mono,monospace);font-size:11px;white-space:pre-wrap;word-break:break-all;background:var(--bg-code,#1a1a1a);padding:6px 8px;border-radius:4px;margin:0;max-height:120px;overflow:auto;";
+    snippet.textContent = issue.snippet || "(no content)";
+
+    body.append(sessionLine, kindLine, snippet);
+    card.append(gutter, body);
+    root.appendChild(card);
+  });
+}
+
 // Fallback: polling 5s nếu WS không kết nối được
 let pollHandle = null;
 function startPollingFallback() {
@@ -205,7 +416,8 @@ function startPollingFallback() {
         if (newMax !== lastEventMaxId) {
           state.events = evs;
           lastEventMaxId = newMax;
-          renderStream(state.events, document.getElementById("stream"), { autoFollow: state.autoFollow });
+          state.reachedOldest = false;
+          renderCurrentPanel();
         }
       } catch {}
     }
@@ -227,6 +439,13 @@ function renderQuickStats() {
 
 async function selectSession(id) {
   state.activeSessionId = id;
+  state.reachedOldest = false;
+  state.loadingOlder = false;
+  // Khi chọn session mới, switch về stream panel
+  state.activePanel = "stream";
+  document.getElementById("btn-panel-stream")?.classList.add("active");
+  document.getElementById("btn-panel-issues")?.classList.remove("active");
+
   renderSessionList(state.sessions, document.getElementById("session-list"), {
     activeId: id,
     onSelect: (sid) => selectSession(sid),
@@ -243,7 +462,7 @@ async function selectSession(id) {
 
   const session = state.sessions.find((s) => s.id === id);
   renderSessionHeader(session, document.getElementById("session-header"));
-  renderStream(state.events, document.getElementById("stream"), { autoFollow: state.autoFollow });
+  renderCurrentPanel();
 }
 
 function renderEmptyStream() {
@@ -269,6 +488,9 @@ function attachHandlers() {
   document.getElementById("auto-follow").addEventListener("change", (e) => {
     state.autoFollow = e.target.checked;
   });
+
+  document.getElementById("btn-panel-stream").addEventListener("click", () => switchPanel("stream"));
+  document.getElementById("btn-panel-issues").addEventListener("click", () => switchPanel("issues"));
   document.getElementById("btn-copy").addEventListener("click", () => flash("Copied to clipboard (mock)"));
   document.getElementById("btn-export").addEventListener("click", () => flash("Exported to /tmp/session.md (mock)"));
   document.getElementById("btn-open").addEventListener("click", () => flash("Open file in editor (mock)"));

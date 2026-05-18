@@ -647,6 +647,37 @@ kbd {
   color: var(--text-mute);
 }
 
+/* Panel tabs (Stream | Issues) */
+.panel-tabs {
+  display: inline-flex;
+  gap: 4px;
+}
+.panel-tab {
+  padding: 4px 10px;
+  font-size: 12px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  color: var(--text-2);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 120ms, color 120ms, border-color 120ms;
+}
+.panel-tab:hover {
+  background: var(--bg-elev);
+  color: var(--text-1);
+  border-color: var(--border-strong);
+}
+.panel-tab.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-color: rgba(110, 168, 254, 0.3);
+}
+
+/* Issue card */
+.issue-card {
+  border-left: 2px solid var(--error);
+}
+
 .hidden { display: none !important; }
 
 /* Scrollbars */
