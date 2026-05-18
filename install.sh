@@ -108,10 +108,22 @@ if [[ ! -x "$EXTRACT_DIR/c2-engine" ]]; then
   err "Không tìm thấy c2-engine binary trong tarball"
 fi
 
-# ── Install binary ────────────────────────────────────────────────────────────
+# ── Install engine binary ─────────────────────────────────────────────────────
 mkdir -p "$BIN_DIR"
 install -m 755 "$EXTRACT_DIR/c2-engine" "$BIN_DIR/c2-engine"
-ok "Binary cài tại $BIN_DIR/c2-engine"
+ok "Engine binary cài tại $BIN_DIR/c2-engine"
+
+# ── Install Tauri UI .app ─────────────────────────────────────────────────────
+if [[ -d "$EXTRACT_DIR/C2-Tracker.app" ]]; then
+  APPS_DIR="$HOME/Applications"
+  mkdir -p "$APPS_DIR"
+  rm -rf "$APPS_DIR/C2-Tracker.app"
+  cp -R "$EXTRACT_DIR/C2-Tracker.app" "$APPS_DIR/"
+  # Clear macOS quarantine attribute (unsigned app từ curl)
+  xattr -d com.apple.quarantine "$APPS_DIR/C2-Tracker.app" 2>/dev/null || true
+  xattr -dr com.apple.quarantine "$APPS_DIR/C2-Tracker.app" 2>/dev/null || true
+  ok "Desktop UI cài tại $APPS_DIR/C2-Tracker.app"
+fi
 
 # ── LaunchAgent ───────────────────────────────────────────────────────────────
 if [[ "$OS" == "darwin" && "$SKIP_AGENT" != "1" ]]; then
@@ -181,17 +193,21 @@ cat <<EOF
 
   Bước tiếp theo:
     1. Mở terminal mới (hoặc: source ${PATH_HINT:-~/.zshrc})
-    2. Verify: c2-engine token   # nên in port + token
-    3. Import session lịch sử (tùy chọn): c2-engine import-all
-    4. Bắt đầu Claude Code session — events sẽ tự track qua hooks
+    2. Verify CLI: c2-engine token   # nên in port + token
+    3. Mở UI: open ~/Applications/C2-Tracker.app
+       (hoặc Spotlight: Cmd+Space → "C2-Tracker")
+    4. Import session lịch sử (tùy chọn): c2-engine import-all
+    5. Bắt đầu Claude Code session — events sẽ tự track + hiện trong UI realtime
 
-  Build UI desktop (tuỳ chọn, ~10 phút):
+  Build UI từ source (developer):
     git clone https://github.com/taipm/C2-Tracker.git
     cd C2-Tracker/app && python3 gen_icons.py && cargo tauri dev
 
   Gỡ cài đặt:
     launchctl unload ~/Library/LaunchAgents/club.microai.c2tracker.engine.plist
     $BIN_DIR/c2-engine uninstall-hooks
-    rm -rf $INSTALL_DIR ~/Library/LaunchAgents/club.microai.c2tracker.engine.plist
+    rm -rf $INSTALL_DIR
+    rm ~/Library/LaunchAgents/club.microai.c2tracker.engine.plist
+    rm -rf ~/Applications/C2-Tracker.app
 
 EOF

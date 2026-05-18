@@ -30,10 +30,16 @@
     }
   },
   "bundle": {
-    "active": false,
-    "targets": "all",
+    "active": true,
+    "targets": ["app", "dmg"],
     "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
       "icons/icon.png"
-    ]
+    ],
+    "category": "DeveloperTool",
+    "shortDescription": "Realtime recording cho Claude Code sessions",
+    "longDescription": "C2-Tracker là desktop app theo dõi và lưu trữ mọi phiên làm việc với Claude Code, hiển thị realtime qua WebSocket."
   }
 }
