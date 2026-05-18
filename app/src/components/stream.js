@@ -7,6 +7,18 @@ function fmtNum(n) {
   return String(n);
 }
 
+function humanAgo(unixMs) {
+  if (!unixMs) return "—";
+  const diff = Math.max(0, Date.now() - unixMs);
+  const sec = Math.floor(diff / 1000);
+  if (sec < 60) return `${sec}s`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m`;
+  const h = Math.floor(min / 60);
+  if (h < 24) return `${h}h ${min % 60}m`;
+  return `${Math.floor(h / 24)}d ${h % 24}h`;
+}
+
 export function renderSessionHeader(session, root) {
   root.textContent = "";
   if (!session) return;
@@ -33,8 +45,8 @@ export function renderSessionHeader(session, root) {
   row2.id = "sh-meta";
 
   const parts = [
-    `started ${session.duration_label} ago`,
-    `${session.duration_label}`,
+    `started ${humanAgo(session.started_at)} ago`,
+    session.duration_label,
     `${fmtNum(session.token_count)} tokens`,
     `${session.event_count} events`,
     `model: ${session.model}`,
@@ -55,7 +67,7 @@ export function renderSessionHeader(session, root) {
   root.append(row1, row2);
 }
 
-export function renderStream(events, root, _opts) {
+export function renderStream(events, root, opts = {}) {
   root.textContent = "";
   if (!events || events.length === 0) {
     const empty = document.createElement("div");
@@ -74,11 +86,18 @@ export function renderStream(events, root, _opts) {
     return;
   }
 
+  // Phát hiện user đã ở gần bottom TRƯỚC khi render (để giữ "feel" auto-follow
+  // mà không giật khi user đang scroll lên đọc event cũ).
+  const wasAtBottom =
+    root.scrollHeight - root.scrollTop - root.clientHeight < 80;
+
   events.forEach((ev) => root.appendChild(renderEvent(ev)));
-  // Auto-scroll to bottom
-  requestAnimationFrame(() => {
-    root.scrollTop = root.scrollHeight;
-  });
+
+  if (opts.autoFollow !== false && wasAtBottom) {
+    requestAnimationFrame(() => {
+      root.scrollTop = root.scrollHeight;
+    });
+  }
 }
 
 function renderEvent(ev) {

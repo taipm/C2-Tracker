@@ -218,6 +218,8 @@ pub fn get_events_impl(pool: &DbPool, session_id: &str, limit: Option<u32>) -> R
     // Filter: chỉ lấy content category (MVP). Meta (last-prompt, file-history-snapshot,
     // permission-mode, ai-title) là metadata, không phải nội dung chat — bỏ khỏi stream.
     // Attachment (hook events) defer Phase 2.
+    // Query DESC để lấy N events MỚI NHẤT (không phải đầu session), sau đó reverse
+    // ở Rust trước khi return để frontend render chronological ASC.
     let mut stmt = conn
         .prepare(
             "SELECT id, session_id, \"type\", category, content_kind,
@@ -227,7 +229,7 @@ pub fn get_events_impl(pool: &DbPool, session_id: &str, limit: Option<u32>) -> R
              FROM events
              WHERE session_id = ?1
                AND category = 'content'
-             ORDER BY timestamp ASC, id ASC
+             ORDER BY timestamp DESC, id DESC
              LIMIT ?2",
         )
         .map_err(|e| e.to_string())?;
@@ -298,6 +300,8 @@ pub fn get_events_impl(pool: &DbPool, session_id: &str, limit: Option<u32>) -> R
             timestamp,
         });
     }
+    // Reverse: query DESC để có 500 events mới nhất → frontend cần chronological ASC
+    events.reverse();
     Ok(events)
 }
 

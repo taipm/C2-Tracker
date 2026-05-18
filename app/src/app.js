@@ -74,6 +74,47 @@ async function init() {
   }
 
   attachHandlers();
+  startPolling();
+}
+
+let pollHandle = null;
+let lastEventMaxId = 0;
+
+function startPolling() {
+  if (pollHandle) return;
+  pollHandle = setInterval(refreshTick, 3000);
+}
+
+async function refreshTick() {
+  try {
+    const fresh = await invoke("get_sessions");
+    const prevTopId = state.sessions[0]?.id;
+    state.sessions = fresh;
+    renderSessionList(state.sessions, document.getElementById("session-list"), {
+      activeId: state.activeSessionId,
+      onSelect: (id) => selectSession(id),
+    });
+    document.getElementById("sessions-count").textContent = String(state.sessions.length);
+    renderRecordingIndicator();
+
+    const newStats = await invoke("get_stats");
+    state.stats = newStats;
+    renderQuickStats();
+
+    if (state.activeSessionId) {
+      const evs = await invoke("get_events", { sessionId: state.activeSessionId });
+      const newMax = evs.length ? evs[evs.length - 1].id : 0;
+      if (newMax !== lastEventMaxId) {
+        state.events = evs;
+        lastEventMaxId = newMax;
+        const session = state.sessions.find((s) => s.id === state.activeSessionId);
+        renderSessionHeader(session, document.getElementById("session-header"));
+        renderStream(state.events, document.getElementById("stream"), { autoFollow: state.autoFollow });
+      }
+    }
+  } catch (err) {
+    console.warn("Polling tick failed:", err);
+  }
 }
 
 function renderRecordingIndicator() {
@@ -98,9 +139,11 @@ async function selectSession(id) {
 
   try {
     state.events = await invoke("get_events", { sessionId: id });
+    lastEventMaxId = state.events.length ? state.events[state.events.length - 1].id : 0;
   } catch (err) {
     console.error("Failed to load events:", err);
     state.events = [];
+    lastEventMaxId = 0;
   }
 
   const session = state.sessions.find((s) => s.id === id);
